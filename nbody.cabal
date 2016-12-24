@@ -25,6 +25,7 @@ executable nbody-exe
   build-depends:       base
                      , mtl
                      , nbody
+                     , vector
                      , linear
                      , random
                      , bytestring
