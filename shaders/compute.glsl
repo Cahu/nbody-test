@@ -20,11 +20,11 @@ float tickLen = 0.2;
 
 vec3 gravityAccel(in uint other_idx)
 {
-    uint gid = gl_GlobalInvocationID.x;
+	uint gid = gl_GlobalInvocationID.x;
 
 	vec3 position       = positions[gid].xyz;
 	vec3 other_position = positions[other_idx].xyz;
-    vec3 diff_position  = other_position - position;
+	vec3 diff_position  = other_position - position;
 
 	float other_mass = positions[other_idx].w;
 	float dist       = length(diff_position);
@@ -36,7 +36,7 @@ vec3 gravityAccel(in uint other_idx)
 
 void main()
 {
-    uint gid = gl_GlobalInvocationID.x;
+	uint gid = gl_GlobalInvocationID.x;
 
 	uint total_stars  = gl_WorkGroupSize.x * gl_NumWorkGroups.x;
 	vec3 acceleration = vec3(0, 0, 0);
@@ -49,15 +49,15 @@ void main()
 		acceleration += gravityAccel(i);
 	}
 
-    float mass     = positions[gid].w;
+	float mass     = positions[gid].w;
 	vec3  position = positions[gid].xyz;
-    vec3  velocity = velocities[gid].xyz;
+	vec3  velocity = velocities[gid].xyz;
 
-    position += tickLen * velocity;
-    velocity += tickLen * acceleration;
+	position += tickLen * velocity;
+	velocity += tickLen * acceleration;
 
-    barrier();
+	barrier();
 
-    positions[gid]  = vec4(position, mass);
-    velocities[gid] = vec4(velocity, 0);
+	positions[gid]  = vec4(position, mass);
+	velocities[gid] = vec4(velocity, 0);
 }
