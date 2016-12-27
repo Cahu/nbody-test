@@ -37,12 +37,17 @@ instance Eq Body where
 
 randomBody :: (RandomGen g) => (Double, Double) -> g -> (Int -> Body, g)
 randomBody (mLo, mHi) g0 =
-    let (m,  g1) = randomR (mLo, mHi) g0
-        (t,  g2) = randomR (-10, 10 ) g1
-        x        = 1000 * cos t
-        y        = 1000 * sin t
+    let (m,  g1) = randomR (mLo,   mHi) g0
+        (t,  g2) = randomR (-10,    10) g1
+        (p,  g3) = randomR (  0,    10) g2
+        (r,  g4) = randomR (-maxDist, maxDist) g3
+        x        = r * cos t * sin p
+        y        = r * sin t * sin p
+        z        = r * cos p
     in
-        (\id -> Body id m (V3 x y 0) (V3 0 0 0), g2)
+        (\idx -> Body idx m (V3 x y z) (V3 0 0 0), g4)
+  where
+    maxDist = 1000
 
 
 newtype System = System { systemBodies :: [Body] }
@@ -62,7 +67,7 @@ randomSystem n g0 =
     --in  (System  (blackHole : bodies), g1)
     in  (System  bodies, g1)
   where
-    st = state $ randomBody (10, 50)
+    st = state $ randomBody (10, 500)
     blackHole = Body 0 10000 (V3 0 0 0) (V3 0 0 0)
 
 
@@ -88,13 +93,12 @@ systemTick tick (System s) = System $ map (updatePosition . applyBodiesForces s)
 gravityAccel :: Body -> Body -> V3 Double
 gravityAccel !b1 !b2 =
     let relativePosition = bodyPosition b1 ^-^ bodyPosition b2
-        distance         = norm relativePosition
-    in  (bigG * bodyMass b1 / (distance**2 + 30**2)**(3/2)) *^ relativePosition
+        dist             = norm relativePosition
+    in  (bigG * bodyMass b1 / (dist**2 + 30**2)**(3/2)) *^ relativePosition
 
 
+vertexFromBody :: Body -> [GLfloat]
+vertexFromBody b = vertexFromVec (bodyPosition b) ++ [realToFrac $ bodyMass b]
 
-vertexFromBody :: Body -> Vertex3 GLfloat
-vertexFromBody = vertexFromVec . bodyPosition
-
-vertexFromVec :: V3 Double -> Vertex3 GLfloat
-vertexFromVec (V3 x y z) = 0.0004 *^ Vertex3 (realToFrac x) (realToFrac y) (realToFrac z)
+vertexFromVec :: V3 Double -> [GLfloat]
+vertexFromVec (V3 x y z) = [(realToFrac x), (realToFrac y), (realToFrac z)]

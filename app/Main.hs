@@ -1,13 +1,12 @@
 module Main where
 
 import Lib
+import GLUtils
 
 import Data.IORef
+import Text.Printf
+import System.Clock
 import System.Random
-import Control.Monad
-import Control.Concurrent
-
-import Linear
 
 import Foreign.Ptr      (nullPtr)
 import Foreign.Storable (sizeOf)
@@ -16,50 +15,41 @@ import Data.Vector.Storable (Vector)
 import qualified Data.Vector.Storable as V
 
 import Graphics.Rendering.OpenGL (GLfloat, ($=))
-import qualified Graphics.Rendering.OpenGL as GL
 import qualified Graphics.UI.GLUT          as GLUT
+import qualified Graphics.Rendering.OpenGL as GL
+import qualified Graphics.GL               as GLRaw
 
-import qualified Data.ByteString as BS
 
-
-newtype Swapper a = Swapper { getPair :: (a, a) }
-
-data ObjectBundle = ObjectBundle
-    { vao :: GL.VertexArrayObject
-    , vbo :: GL.BufferObject
+data Perf = Perf
+    { perfTime :: TimeSpec
+    , perfDiff :: TimeSpec
     }
 
-swap :: Swapper a -> Swapper a
-swap (Swapper (a, b)) = Swapper (b, a)
+nullPerf :: Perf
+nullPerf = Perf
+    { perfTime = 0
+    , perfDiff = 0
+    }
 
+refreshPerf :: Perf -> IO Perf
+refreshPerf perf = do
+    tm <- getTime Monotonic
+    return $ perf { perfTime = tm
+                  , perfDiff = tm - perfTime perf
+                  }
 
-mkShader :: GL.ShaderType -> FilePath -> IO GL.Shader
-mkShader shaderType sourcePath = do
-    s <- GL.createShader shaderType
-    c <- BS.readFile sourcePath
-    GL.shaderSourceBS s $= c
-    GL.compileShader s
-    status <- GL.compileStatus s
-    unless status $ do
-        info <- GL.shaderInfoLog s
-        error info
-    return s
+numStars :: (Num a) => a
+numStars = 12*1024
 
-
-checkProgram :: GL.Program -> IO ()
-checkProgram program = do
-    status <- GL.linkStatus program
-    unless status $ do
-        info <- GL.programInfoLog program
-        error info
+groupSize :: (Num a) => a
+groupSize = 1024
 
 
 makePhysicsProgram :: IO GL.Program
 makePhysicsProgram = do
-    shader  <- mkShader GL.VertexShader "shaders/physics.glsl"
+    shader  <- mkShader GL.ComputeShader "shaders/compute.glsl"
     program <- GL.createProgram
     GL.attachShader program shader
-    GL.setTransformFeedbackVaryings program ["oValue"] GL.InterleavedAttribs
     GL.linkProgram program
     GL.detachShader program shader
     checkProgram program
@@ -80,38 +70,38 @@ makeRenderProgram = do
     return pgrm
 
 
-verticesArraySize :: (V.Storable a, Num b) => Vector a -> b
-verticesArraySize v 
+floatsArraySize :: (V.Storable a, Num b) => Vector a -> b
+floatsArraySize v 
     | V.null v  = 0
     | otherwise = fromIntegral $ V.length v * sizeOf (V.head v)
 
 
-makeVBO :: Vector GLfloat -> IO GL.BufferObject
-makeVBO vertices = do
-    vbo <- GL.genObjectName
-    GL.bindBuffer GL.ArrayBuffer $= Just vbo
-    V.unsafeWith vertices $ \v -> do
-        let size = verticesArraySize vertices
-        GL.bufferData GL.ArrayBuffer $= (size, v, GL.StreamDraw)
-    GL.bindBuffer GL.ArrayBuffer $= Nothing
-    return vbo
+makeSSBO :: Vector GLfloat -> IO GL.BufferObject
+makeSSBO floats = do
+    ssbo <- GL.genObjectName
+    GL.bindBuffer GL.ShaderStorageBuffer $= Just ssbo
+    V.unsafeWith floats $ \v -> do
+        let size = floatsArraySize floats
+        GL.bufferData GL.ShaderStorageBuffer $= (size, v, GL.StreamDraw)
+    GL.bindBuffer GL.ShaderStorageBuffer $= Nothing
+    return ssbo
 
 
-makeEmptyVBO :: (Integral a ) => a -> IO GL.BufferObject
-makeEmptyVBO size = do
-    vbo <- GL.genObjectName
-    GL.bindBuffer GL.ArrayBuffer $= Just vbo
-    GL.bufferData GL.ArrayBuffer $= (fromIntegral size, nullPtr, GL.StreamDraw)
-    GL.bindBuffer GL.ArrayBuffer $= Nothing
-    return vbo
+makeEmptySSBO :: (Integral a ) => a -> IO GL.BufferObject
+makeEmptySSBO size = do
+    ssbo <- GL.genObjectName
+    GL.bindBuffer GL.ShaderStorageBuffer $= Just ssbo
+    GL.bufferData GL.ShaderStorageBuffer $= (fromIntegral size, nullPtr, GL.StreamDraw)
+    GL.bindBuffer GL.ShaderStorageBuffer $= Nothing
+    return ssbo
 
 
 makeVaoForBuffer :: GL.BufferObject -> IO GL.VertexArrayObject
-makeVaoForBuffer vbo = do
+makeVaoForBuffer ssbo = do
     vao <- GL.genObjectName
     GL.bindVertexArrayObject     $= Just vao
-    GL.bindBuffer GL.ArrayBuffer $= Just vbo
-    GL.vertexAttribPointer (GL.AttribLocation 0) $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float 0 nullPtr)
+    GL.bindBuffer GL.ArrayBuffer $= Just ssbo
+    GL.vertexAttribPointer (GL.AttribLocation 0) $= (GL.ToFloat, GL.VertexArrayDescriptor 4 GL.Float 0 nullPtr)
     GL.vertexAttribArray   (GL.AttribLocation 0) $= GL.Enabled
     GL.bindVertexArrayObject     $= Nothing
     GL.bindBuffer GL.ArrayBuffer $= Nothing
@@ -120,11 +110,18 @@ makeVaoForBuffer vbo = do
 
 main :: IO ()
 main = do
-    win <- init
+    _ <- initGLUT
 
-    {- setup VBOs -}
-    vboA <- makeVBO      vertices
-    vboB <- makeEmptyVBO (verticesArraySize vertices)
+    perf <- newIORef nullPerf
+    seed <- fromIntegral . toNanoSecs <$> getTime Monotonic
+
+    let bodies     = fst $ randomSystem numStars (mkStdGen seed)
+        vertices   = V.fromList $ concatMap vertexFromBody (systemBodies bodies)
+        velocities = V.replicate (4*numStars) 0
+
+    {- setup SSBOs -}
+    ssboPos <- makeSSBO vertices
+    ssboVel <- makeSSBO velocities
 
     {- setup physics program -}
     physicsProg <- makePhysicsProgram
@@ -133,66 +130,56 @@ main = do
     rendererProg <- makeRenderProgram
 
     {- setup VAOs for rendering -}
-    vaoA <- makeVaoForBuffer vboA
-    vaoB <- makeVaoForBuffer vboB
-
-    swapper <- newIORef $ Swapper (ObjectBundle vaoA vboA, ObjectBundle vaoB vboB)
+    vao <- makeVaoForBuffer ssboPos
 
     --sys  <- newIORef $ System [ b1, b2 ]
     --let (randSys, _) = randomSystem 300 (mkStdGen 2)
     --sys <- newIORef $ randSys
 
-    GLUT.displayCallback $= display rendererProg swapper
+    GLUT.displayCallback $= display rendererProg vao
     GLUT.reshapeCallback $= Just reshape
-    GLUT.idleCallback    $= Just (idle physicsProg swapper)
+    GLUT.idleCallback    $= Just (idle perf physicsProg ssboPos ssboVel)
     GLUT.mainLoop
  
   where
-    vertices = V.fromList
-        [ ( 0.0), ( 0.5), 0
-        , ( 0.5), (-0.5), 0
-        , (-0.5), (-0.5), 0
-        ]
-
-    b1 = Body 1 1000  (V3   1000  0 0) (V3 0 0 0)
-    b2 = Body 2 1000  (V3 (-1000) 0 0) (V3 0 0 0)
-
-    init :: IO GLUT.Window
-    init = do
+    initGLUT :: IO GLUT.Window
+    initGLUT = do
         GLUT.initialDisplayMode $= [GLUT.DoubleBuffered]
         (progName, _) <- GLUT.getArgsAndInitialize
         GLUT.createWindow progName
 
-    debug :: System -> IO ()
-    debug sys = mapM_ (print) (systemBodies sys) >> putStrLn "---"
-
-    display :: GL.Program -> IORef (Swapper ObjectBundle) -> GLUT.DisplayCallback
-    display pgrm swapperRef = do
-        (bundle, _) <- getPair <$> readIORef swapperRef
+    display :: GL.Program -> GL.VertexArrayObject -> GLUT.DisplayCallback
+    display pgrm vao = do
         GLUT.clear [ GLUT.ColorBuffer, GLUT.DepthBuffer ]
         GL.currentProgram        $= Just pgrm
-        GL.bindVertexArrayObject $= Just (vao bundle)
-        GL.drawArrays GL.Triangles 0 3
+        GL.bindVertexArrayObject $= Just vao
+        GL.drawArrays GL.Points 0 numStars
         GL.bindVertexArrayObject $= Nothing
         GLUT.swapBuffers
 
-    idle :: GL.Program -> IORef (Swapper ObjectBundle) -> GLUT.IdleCallback
-    idle pgrm swapperRef = do
-        (bundleA, bundleB) <- getPair <$> readIORef swapperRef
-        GL.currentProgram    $= Just pgrm
-        GL.bindVertexArrayObject                              $= Just (vao bundleA)
-        GL.bindBufferBase GL.IndexedTransformFeedbackBuffer 0 $= Just (vbo bundleB)
-        GL.rasterizerDiscard $= GL.Enabled
-        GL.beginTransformFeedback GL.Points
-        GL.drawArrays GL.Points 0 3
-        GL.endTransformFeedback
-        GL.rasterizerDiscard $= GL.Disabled
-        GL.bindBufferBase GL.IndexedTransformFeedbackBuffer 0 $= Nothing
-        GL.bindVertexArrayObject                              $= Nothing
-        modifyIORef swapperRef swap
+    idle :: IORef Perf -> GL.Program -> GL.BufferObject -> GL.BufferObject -> GLUT.IdleCallback
+    idle perfRef pgrm ssboPos ssboVel = do
+        updateAndPrintFPS perfRef
+        GL.currentProgram $= Just pgrm
+        GL.bindBufferBase GL.IndexedShaderStorageBuffer 0 $= Just ssboPos
+        GL.bindBufferBase GL.IndexedShaderStorageBuffer 1 $= Just ssboVel
+        GLRaw.glDispatchCompute (numStars `div` groupSize) 1 1
+        GLRaw.glMemoryBarrier GLRaw.GL_SHADER_STORAGE_BARRIER_BIT
+        --bindBufferAndApply ssboPos (numStars * 4) printVectorGLfloat
         GLUT.postRedisplay Nothing
 
     reshape :: GLUT.ReshapeCallback
     reshape size = do
         GLUT.viewport $= (GLUT.Position 0 0, size)
         GLUT.postRedisplay Nothing
+
+    printVectorGLfloat :: Vector GLfloat -> IO ()
+    printVectorGLfloat = print
+
+    updateAndPrintFPS :: IORef Perf -> IO ()
+    updateAndPrintFPS perfRef = do
+        perf  <- readIORef perfRef
+        perf' <- refreshPerf perf
+        writeIORef perfRef perf'
+        let fps = (1000000000 :: Double) / fromIntegral (toNanoSecs $ perfDiff perf')
+        printf "%.2f FPS\n" fps
